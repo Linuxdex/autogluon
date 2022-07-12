@@ -7,8 +7,8 @@ from autogluon.multimodal.constants import (
     BINARY,
     REGRESSION,
 )
+from autogluon.multimodal.utils import download
 from utils import (
-    download,
     get_data_home_dir,
     get_repo_url,
     protected_zip_extraction,
@@ -47,13 +47,13 @@ class PetFinderDataset:
 
         _, self._train_df = train_test_split(
             self._train_df,
-            test_size=0.5,
+            test_size=0.1,
             random_state=np.random.RandomState(123),
             stratify=self._train_df[self.label_columns[0]],
         )
         _, self._test_df = train_test_split(
             self._test_df,
-            test_size=0.2,
+            test_size=0.1,
             random_state=np.random.RandomState(123),
             stratify=self._test_df[self.label_columns[0]],
         )
