@@ -33,8 +33,11 @@ def is_categorical_column(
     """
     Identify whether a column is one categorical column.
     If the number of unique elements in the column is smaller than
+
         min(#Total Sample * ratio, threshold),
+
     it will be treated as a categorical column.
+
     Parameters
     ----------
     data
@@ -51,6 +54,7 @@ def is_categorical_column(
         Usually, a categorical column can tolerate a small OOV ratio.
     is_label
         Whether the column is a label column.
+
     Returns
     -------
     Whether the column is a categorical column.
@@ -93,12 +97,14 @@ def is_numerical_column(
     """
     Identify if a column is a numerical column.
     Here it uses a very simple rule to verify if this is a numerical column.
+
     Parameters
     ----------
     data
         One column of a multimodal pd.DataFrame for training.
     valid_data
         One column of a multimodal pd.DataFrame for validation.
+
     Returns
     -------
     Whether the column is a numerical column.
@@ -120,12 +126,14 @@ def is_imagepath_column(
     Identify if a column is one image-path column.
     Here it counts the failures when trying PIL.Image.open() on a sampled subset.
     If over 90% attempts fail, this column isn't an image-path column.
+
     Parameters
     ----------
     data
         One column of a multimodal pd.DataFrame for training.
     col_name
         Name of column.
+
     Returns
     -------
     Whether the column is an image-path column.
@@ -166,10 +174,12 @@ def is_imagepath_column(
 def is_text_column(X: pd.Series) -> bool:
     """
     Identify if a column is one text column.
+
     Parameters
     ----------
     X
         One column of a multimodal pd.DataFrame for training.
+
     Returns
     -------
     Whether the column is a text column.
@@ -203,6 +213,7 @@ def infer_column_types(
 ) -> Dict:
     """
     Infer the column types of a multimodal pd.DataFrame.
+
     Parameters
     ----------
     data
@@ -218,6 +229,7 @@ def infer_column_types(
         What column types are allowed. This is the prior knowledge inferred from the model type.
     fallback_column_type
         What's the fallback column type if the detected type if out of the allowable_column_types.
+
     Returns
     -------
     column_types
@@ -299,6 +311,7 @@ def infer_label_column_type_by_problem_type(
 ):
     """
     Infer the label column types based on problem type.
+
     Parameters
     ----------
     column_types
@@ -315,6 +328,7 @@ def infer_label_column_type_by_problem_type(
         Which label types are allowed.
     fallback_label_type
         If a label type is not within the allowable_label_types, replace it with this fallback_label_type.
+
     Returns
     -------
     Column types with the label columns' types inferred from the problem type.
@@ -356,6 +370,7 @@ def infer_problem_type_output_shape(
     Infer the problem type and output shape based on the label column type and training data.
     Binary classification should have class number 2, while multi-class classification's class
     number should be larger than 2. For regression, the output is restricted to 1 scalar.
+
     Parameters
     ----------
     column_types
@@ -366,6 +381,7 @@ def infer_problem_type_output_shape(
         The multimodal pd.DataFrame for training.
     provided_problem_type
         The provided problem type.
+
     Returns
     -------
     problem_type
@@ -425,6 +441,7 @@ def set_fallback_column_type(column_types: Dict, allowable_column_types: List[st
     """
     Filter the auto-detected column types to make sure that all column types are allowable.
     Use the fallback type to replace those out of the allowable_column_types.
+
     Parameters
     ----------
     column_types
@@ -433,6 +450,7 @@ def set_fallback_column_type(column_types: Dict, allowable_column_types: List[st
         The column types which are allowed by the model type.
     fallback_column_type
         Fallback to this type if some invalid column type is found.
+
     Returns
     -------
     The filtered column types.

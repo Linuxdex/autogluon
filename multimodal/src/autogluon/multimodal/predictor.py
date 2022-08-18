@@ -278,12 +278,12 @@ class MultiModalPredictor:
         hyperparameters: Optional[Union[str, Dict, List[str]]] = None,
         column_types: Optional[dict] = None,
         holdout_frac: Optional[float] = None,
-        teacher_predictor: Union[str, AutoMMPredictor] = None,
+        teacher_predictor: Union[str, MultiModalPredictor] = None,
         seed: Optional[int] = 123,
         hyperparameter_tune_kwargs: Optional[dict] = None,
     ):
         """
-        Fit AutoMMPredictor predict label column of a dataframe based on the other columns,
+        Fit MultiModalPredictor predict label column of a dataframe based on the other columns,
         which may contain image path, text, numeric, or categorical features.
 
         Parameters
@@ -383,7 +383,7 @@ class MultiModalPredictor:
 
         Returns
         -------
-        An "AutoMMPredictor" object (itself).
+        An "MultiModalPredictor" object (itself).
         """
         if hyperparameter_tune_kwargs is not None:
             # TODO: can we support hyperparameters being the same format as regular training?
@@ -424,7 +424,7 @@ class MultiModalPredictor:
 
         # Generate general info that's not config specific
         if tuning_data is None:
-            if self._problem_type in [BINARY, MULTICLASS]:
+            if self._problem_type in [BINARY, MULTICLASS, CLASSIFICATION]:
                 stratify = train_data[self._label_column]
             else:
                 stratify = None
@@ -472,6 +472,9 @@ class MultiModalPredictor:
             column_types = self._column_types
 
         if self._problem_type is not None:
+            if self._problem_type == CLASSIFICATION:
+                # Set the problem type to be inferred problem type
+                self._problem_type = problem_type
             assert self._problem_type == problem_type, (
                 f"Inferred problem type {problem_type} is different from " f"the previous {self._problem_type}"
             )
@@ -659,10 +662,12 @@ class MultiModalPredictor:
         """
         Prepare for distillation. It verifies whether the student and teacher predictors have consistent
         configurations. If teacher and student have duplicate model names, it modifies teacher's model names.
+
         Parameters
         ----------
         teacher_predictor
             The teacher predictor in knowledge distillation.
+
         Returns
         -------
         teacher_model
@@ -809,7 +814,7 @@ class MultiModalPredictor:
         presets: Optional[str] = None,
         config: Optional[dict] = None,
         hyperparameters: Optional[Union[str, Dict, List[str]]] = None,
-        teacher_predictor: Union[str, AutoMMPredictor] = None,
+        teacher_predictor: Union[str, MultiModalPredictor] = None,
         hpo_mode: bool = False,
         **hpo_kwargs,
     ):
@@ -903,7 +908,7 @@ class MultiModalPredictor:
         if hasattr(config, MATCHER):
             warnings.warn("Matching is experimental. We may change its behaviors in future.", UserWarning)
             match_label = self._df_preprocessor.label_generator.transform([self._config.matcher.match_label]).item()
-            data_processors = turn_on_off_feature_column_info(
+            turn_on_off_feature_column_info(
                 data_processors=data_processors,
                 flag=True,
             )
@@ -1101,10 +1106,10 @@ class MultiModalPredictor:
 
         if is_interactive() and num_gpus > 1:
             warnings.warn(
-                "Interactive environment is detected. Currently, AutoMMPredictor does not support multi-gpu "
+                "Interactive environment is detected. Currently, MultiModalPredictor does not support multi-gpu "
                 "training under an interactive environment due to the limitation of ddp / ddp_spawn strategies "
                 "in PT Lightning. Thus, we switch to single gpu training. For multi-gpu training, you need to execute "
-                "AutoMMPredictor in a script.",
+                "MultiModalPredictor in a script.",
                 UserWarning,
             )
             num_gpus = 1
@@ -1112,7 +1117,7 @@ class MultiModalPredictor:
         if num_gpus == 0:  # CPU only training
             warnings.warn(
                 "Only CPU is detected in the instance. "
-                "AutoMMPredictor will be trained with CPU only. "
+                "MultiModalPredictor will be trained with CPU only. "
                 "This may results in slow training speed. "
                 "Consider to switch to an instance with GPU support.",
                 UserWarning,
@@ -1266,7 +1271,7 @@ class MultiModalPredictor:
 
                     ingredients = [top_k_model_paths[0]]
                     self._model = self._load_state_dict(
-                        model=model,
+                        model=self._model,
                         path=top_k_model_paths[0],
                         prefix=prefix,
                     )
@@ -1356,7 +1361,7 @@ class MultiModalPredictor:
         if num_gpus == 0:  # CPU only prediction
             warnings.warn(
                 "Only CPU is detected in the instance. "
-                "AutoMMPredictor will predict with CPU only. "
+                "MultiModalPredictor will predict with CPU only. "
                 "This may results in slow prediction speed. "
                 "Consider to switch to an instance with GPU support.",
                 UserWarning,
@@ -1387,12 +1392,12 @@ class MultiModalPredictor:
             strategy = None
 
         if hasattr(self._config, MATCHER):
-            data_processors = turn_on_off_feature_column_info(
+            turn_on_off_feature_column_info(
                 data_processors=data_processors,
                 flag=True,
             )
         predict_dm = BaseDataModule(
-            df_preprocessor=self._df_preprocessor,
+            df_preprocessor=df_preprocessor,
             data_processors=data_processors,
             per_gpu_batch_size=batch_size,
             num_workers=self._config.env.num_workers_evaluation,
@@ -1439,6 +1444,7 @@ class MultiModalPredictor:
                 benchmark=False,
                 enable_progress_bar=self._enable_progress_bar,
                 deterministic=self._config.env.deterministic,
+                max_epochs=-1,  # Add max_epochs to disable warning
                 logger=False,
             )
 
@@ -1632,7 +1638,7 @@ class MultiModalPredictor:
         self,
         data: Union[pd.DataFrame, dict, list],
         candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
-        as_pandas: Optional[bool] = True,
+        as_pandas: Optional[bool] = None,
     ):
         """
         Predict values for the label column of new data.
@@ -1684,6 +1690,7 @@ class MultiModalPredictor:
 
         if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
             pred = self._as_pandas(data=data, to_be_converted=pred)
+
         return pred
 
     def predict_proba(
@@ -1812,9 +1819,9 @@ class MultiModalPredictor:
             return features
 
     def _as_pandas(
-            self,
-            data: Union[pd.DataFrame, dict, list],
-            to_be_converted: np.ndarray,
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        to_be_converted: np.ndarray,
     ):
         if isinstance(data, pd.DataFrame):
             index = data.index

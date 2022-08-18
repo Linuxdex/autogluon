@@ -530,9 +530,9 @@ def select_model(
 def init_df_preprocessor(
     config: DictConfig,
     column_types: Dict,
-    label_column: str,
-    train_df_x: pd.DataFrame,
-    train_df_y: pd.Series,
+    label_column: Optional[str] = None,
+    train_df_x: Optional[pd.DataFrame] = None,
+    train_df_y: Optional[pd.Series] = None,
     fewshot: Optional[bool] =False,
 ):
     """

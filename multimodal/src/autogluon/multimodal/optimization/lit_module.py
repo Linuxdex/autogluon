@@ -151,7 +151,6 @@ class LitModule(pl.LightningModule):
         else:
             metric.update(logits.squeeze(dim=1), label)
 
-
     def _shared_step(
         self,
         batch: Dict,
