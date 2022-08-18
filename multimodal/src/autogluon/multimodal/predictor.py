@@ -1462,23 +1462,11 @@ class MultiModalPredictor:
                         task,
                         datamodule=predict_dm,
                     )
-        if ret_type == LOGITS:
-            logits = [ele[LOGITS] for ele in outputs]
-            ret = torch.cat(logits)
-        elif ret_type == PROBABILITY:
-            probability = [ele[PROBABILITY] for ele in outputs]
-            ret = torch.cat(probability)
-        elif ret_type == FEATURES:
-            features = [ele[FEATURES] for ele in outputs]
-            ret = torch.cat(features)
-        else:
-            raise ValueError(f"Unknown return type: {ret_type}")
+
         if hasattr(self._config, FEWSHOT):
-            label_list = torch.cat(label_list)
-            y_true = torch.cat(y_true)
-            return ret, y_true, label_list
+            return outputs, y_true, label_list
         else:
-            return ret
+            return outputs
 
     def _on_predict_start(
         self,
@@ -1549,8 +1537,11 @@ class MultiModalPredictor:
                 ret_type=ret_type,
                 requires_label=True,
             )
+            label_list = torch.cat(label_list)
+            y_true = torch.cat(y_true)
         else:
             label_list = None
+            y_true = None
             outputs = self._predict(
                 data=data,
                 ret_type=ret_type,
@@ -1561,9 +1552,9 @@ class MultiModalPredictor:
         metric_data = {}
         if self._problem_type in [BINARY, MULTICLASS]:
             if ret_type == LOGITS:
-                y_pred_prob = self._logits_to_prob(logits_or_prob)
+                y_pred_prob = logits_to_prob(logits_or_prob)
             else:
-                y_pred_prob = logits_or_prob.detach().cpu().float().numpy()
+                y_pred_prob = logits_or_prob
             metric_data[Y_PRED_PROB] = y_pred_prob
 
         y_pred = self._df_preprocessor.transform_prediction(
@@ -1576,7 +1567,8 @@ class MultiModalPredictor:
             inverse_categorical=True,
             fewshot_label_list=label_list,
         )
-        y_true = self._df_preprocessor.transform_label_for_metric(df=data)
+        if y_true is None:
+            y_true = self._df_preprocessor.transform_label_for_metric(df=data)
 
         metric_data.update(
             {
