@@ -845,7 +845,6 @@ class MultiModalPredictor:
         if self._data_processors is None:
             data_processors = init_data_processors(
                 config=config,
-                df_preprocessor=df_preprocessor,
             )
         else:  # continuing training
             data_processors = self._data_processors
