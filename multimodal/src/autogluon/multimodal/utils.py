@@ -555,6 +555,7 @@ def init_df_preprocessor(
         A pd.Series object containing only the label column.
     few_shot
         Whether to be a few-shot task.
+
     Returns
     -------
     Initialized dataframe preprocessor.
@@ -575,7 +576,6 @@ def init_df_preprocessor(
 
 def init_data_processors(
     config: DictConfig,
-    df_preprocessor: MultiModalFeaturePreprocessor,
 ):
     """
     Create the data processors according to the model config. This function creates one processor for
@@ -590,8 +590,6 @@ def init_data_processors(
     ----------
     config
         A DictConfig object. The model config should be accessible by "config.model".
-    df_preprocessor
-        The dataframe preprocessor.
 
     Returns
     -------
@@ -623,7 +621,6 @@ def init_data_processors(
                         checkpoint_name=model_config.checkpoint_name,
                         train_transform_types=model_config.train_transform_types,
                         val_transform_types=model_config.val_transform_types,
-                        image_column_names=df_preprocessor.image_path_names,
                         norm_type=model_config.image_norm,
                         size=model_config.image_size,
                         max_img_num_per_col=model_config.max_img_num_per_col,
@@ -636,7 +633,6 @@ def init_data_processors(
                         prefix=model_name,
                         tokenizer_name=model_config.tokenizer_name,
                         checkpoint_name=model_config.checkpoint_name,
-                        text_column_names=df_preprocessor.text_feature_names,
                         max_len=model_config.max_text_len,
                         insert_sep=model_config.insert_sep,
                         text_segment_num=model_config.text_segment_num,
@@ -650,14 +646,12 @@ def init_data_processors(
                 data_processors[CATEGORICAL].append(
                     CategoricalProcessor(
                         prefix=model_name,
-                        categorical_column_names=df_preprocessor.categorical_feature_names,
                     )
                 )
             elif d_type == NUMERICAL:
                 data_processors[NUMERICAL].append(
                     NumericalProcessor(
                         prefix=model_name,
-                        numerical_column_names=df_preprocessor.numerical_feature_names,
                         merge=model_config.merge,
                     )
                 )
@@ -673,7 +667,7 @@ def init_data_processors(
 
 def create_model(
     config: DictConfig,
-    num_classes: int,
+    num_classes: Optional[int] = None,
     num_numerical_columns: Optional[int] = None,
     num_categories: Optional[List[int]] = None,
     pretrained: Optional[bool] = True,
@@ -728,6 +722,8 @@ def create_model(
                 prefix=model_name,
                 checkpoint_name=model_config.checkpoint_name,
                 num_classes=num_classes,
+                pooling_mode=OmegaConf.select(model_config, "pooling_mode", default="cls"),
+                gradient_checkpointing=OmegaConf.select(model_config, "gradient_checkpointing"),
             )
         elif model_name.lower().startswith(NUMERICAL_MLP):
             model = NumericalMLP(
@@ -1390,18 +1386,12 @@ def turn_on_off_feature_column_info(
         The data processors.
     flag
         True/False
-
-    Returns
-    -------
-    The data processors with the flag on or off.
     """
     for per_modality_processors in data_processors.values():
         for per_model_processor in per_modality_processors:
             # label processor doesn't have requires_column_info.
             if hasattr(per_model_processor, "requires_column_info"):
                 per_model_processor.requires_column_info = flag
-
-    return data_processors
 
 
 def try_to_infer_pos_label(
@@ -1513,8 +1503,8 @@ class CustomUnpickler(pickle.Unpickler):
 
 def data_to_df(
     data: Union[pd.DataFrame, Dict, List],
-    required_columns: List,
-    all_columns: List,
+    required_columns: Optional[List] = None,
+    all_columns: Optional[List] = None,
 ):
     """
     Convert the input data to a dataframe.
@@ -1544,11 +1534,12 @@ def data_to_df(
             f'We have type(data)="{type(data)}", but a pd.DataFrame was required.'
         )
 
-    detected_columns = data.columns.values.tolist()
-    missing_columns = []
-    for per_col in required_columns:
-        if per_col not in detected_columns:
-            missing_columns.append(per_col)
+    if required_columns and all_columns:
+        detected_columns = data.columns.values.tolist()
+        missing_columns = []
+        for per_col in required_columns:
+            if per_col not in detected_columns:
+                missing_columns.append(per_col)
 
         if len(missing_columns) > 0:
             # assume no column names are provided and users organize data in the same column order of training data.
