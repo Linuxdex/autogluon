@@ -62,7 +62,6 @@ from .constants import (
     Y_PRED_PROB,
     Y_TRUE,
     ZERO_SHOT_IMAGE_CLASSIFICATION,
-    FEWSHOT,
 )
 from .data.datamodule import BaseDataModule
 from .data.infer_types import (
@@ -72,7 +71,6 @@ from .data.infer_types import (
 )
 from .optimization.lit_distiller import DistillerLitModule
 from .optimization.lit_matcher import MatcherLitModule
-from .optimization.lit_few_shot import FewShotLitModule
 from .optimization.lit_module import LitModule
 from .optimization.rkd_loss import RKDLoss
 from .optimization.utils import get_loss_func, get_metric
@@ -114,30 +112,6 @@ from .utils import (
 logger = logging.getLogger(AUTOMM)
 
 
-class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
-    """
-    Class that inherits pl.callbacks.ModelCheckpoint. The purpose is to resolve the potential issues in lightning.
-
-    - Issue1:
-
-    It solves the issue described in https://github.com/PyTorchLightning/pytorch-lightning/issues/5582.
-    For ddp_spawn, the checkpoint_callback.best_k_models will be empty.
-    Here, we resolve it by storing the best_models to "SAVE_DIR/best_k_models.yaml".
-
-    """
-
-    def _update_best_and_save(
-        self,
-        current: torch.Tensor,
-        trainer: "pl.Trainer",
-        monitor_candidates: Dict[str, _METRIC],
-    ) -> None:
-        super(AutoMMModelCheckpoint, self)._update_best_and_save(
-            current=current, trainer=trainer, monitor_candidates=monitor_candidates
-        )
-        self.to_yaml()
-
-
 class MultiModalPredictor:
     """
     MultiModalPredictor is a deep learning "model zoo" of model zoos. It can automatically build deep learning models that
@@ -151,10 +125,11 @@ class MultiModalPredictor:
 
     def __init__(
         self,
-        label: str,
+        label: Optional[str] = None,
         problem_type: Optional[str] = None,
         pipeline: Optional[str] = None,
         eval_metric: Optional[str] = None,
+        hyperparameters: Optional[dict] = None,
         path: Optional[str] = None,
         verbosity: Optional[int] = 3,
         warn_if_exist: Optional[bool] = True,
@@ -176,6 +151,21 @@ class MultiModalPredictor:
         eval_metric
             Evaluation metric name. If `eval_metric = None`, it is automatically chosen based on `problem_type`.
             Defaults to 'accuracy' for binary and multiclass classification, 'root_mean_squared_error' for regression.
+        hyperparameters
+            This is to override some default configurations.
+            For example, changing the text and image backbones can be done by formatting:
+
+            a string
+            hyperparameters = "model.hf_text.checkpoint_name=google/electra-small-discriminator model.timm_image.checkpoint_name=swin_small_patch4_window7_224"
+
+            or a list of strings
+            hyperparameters = ["model.hf_text.checkpoint_name=google/electra-small-discriminator", "model.timm_image.checkpoint_name=swin_small_patch4_window7_224"]
+
+            or a dictionary
+            hyperparameters = {
+                            "model.hf_text.checkpoint_name": "google/electra-small-discriminator",
+                            "model.timm_image.checkpoint_name": "swin_small_patch4_window7_224",
+                        }
         path
             Path to directory where models and intermediate outputs should be saved.
             If unspecified, a time-stamped folder called "AutogluonAutoMM/ag-[TIMESTAMP]"
@@ -1499,12 +1489,39 @@ class MultiModalPredictor:
         else:
             return ret
 
-    @staticmethod
-    def _logits_to_prob(logits: torch.Tensor):
-        assert logits.ndim == 2
-        prob = F.softmax(logits.float(), dim=1)
-        prob = prob.detach().cpu().float().numpy()
-        return prob
+    def _on_predict_start(
+            self,
+            config: DictConfig,
+            data: Union[pd.DataFrame, dict, list],
+            requires_label: bool,
+    ):
+        data = data_to_df(data=data)
+
+        if self._column_types is None:
+            allowable_dtypes, fallback_dtype = infer_dtypes_by_model_names(model_config=self._config.model)
+            column_types = infer_column_types(
+                data=data, allowable_column_types=allowable_dtypes, fallback_column_type=fallback_dtype
+            )
+        else:  # called .fit() or .load()
+            column_types = self._column_types
+
+        if self._df_preprocessor is None:
+            df_preprocessor = init_df_preprocessor(
+                config=config.data,
+                column_types=column_types,
+                label_column=self._label_column,
+                train_df_x=data,
+                train_df_y=data[self._label_column] if self._label_column else None,
+            )
+        else:  # called .fit() or .load()
+            df_preprocessor = self._df_preprocessor
+
+        data_processors = copy.deepcopy(self._data_processors)
+        # For prediction data with no labels provided.
+        if not requires_label:
+            data_processors.pop(LABEL, None)
+
+        return data, df_preprocessor, data_processors
 
     def evaluate(
         self,
