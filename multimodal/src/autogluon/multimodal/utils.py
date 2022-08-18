@@ -529,7 +529,7 @@ def select_model(
 
 def init_df_preprocessor(
     config: DictConfig,
-    column_types: collections.OrderedDict,
+    column_types: Dict,
     label_column: str,
     train_df_x: pd.DataFrame,
     train_df_y: pd.Series,
@@ -553,6 +553,8 @@ def init_df_preprocessor(
         A pd.DataFrame containing only the feature columns.
     train_df_y
         A pd.Series object containing only the label column.
+    few_shot
+        Whether to be a few-shot task.
     Returns
     -------
     Initialized dataframe preprocessor.

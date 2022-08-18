@@ -6,6 +6,7 @@ NUMERICAL = "numerical"
 IMAGE_PATH = "image_path"
 
 # Problem types
+CLASSIFICATION = "classification"
 BINARY = "binary"
 MULTICLASS = "multiclass"
 REGRESSION = "regression"
@@ -150,3 +151,6 @@ RAY_TUNE_CHECKPOINT = "ray_tune_checkpoint.ckpt"
 BEST_K_MODELS_FILE = "best_k_models.yaml"
 LAST_CHECKPOINT = "last.ckpt"
 MODEL_CHECKPOINT = "model.ckpt"
+
+# url
+S3_PREFIX = "s3://"

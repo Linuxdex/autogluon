@@ -447,12 +447,24 @@ class MultiModalPredictor:
                 random_state=np.random.RandomState(seed),
             )
 
-        column_types, problem_type, output_shape = infer_column_problem_types(
-            train_df=train_data,
-            valid_df=tuning_data,
+        column_types = infer_column_types(
+            data=train_data,
+            valid_data=tuning_data,
+            label_columns=self._label_column,
+            provided_column_types=column_types,
+        )
+        column_types = infer_label_column_type_by_problem_type(
+            column_types=column_types,
             label_columns=self._label_column,
             problem_type=self._problem_type,
-            provided_column_types=column_types,
+            data=train_data,
+            valid_data=tuning_data,
+        )
+        problem_type, output_shape = infer_problem_type_output_shape(
+            label_column=self._label_column,
+            column_types=column_types,
+            data=train_data,
+            provided_problem_type=self._problem_type,
         )
 
         logger.debug(f"column_types: {column_types}")
@@ -582,7 +594,7 @@ class MultiModalPredictor:
             )
             if best_trial is None:
                 raise ValueError(
-                    "AutoMMPredictor wasn't able to find the best trial."
+                    "MultiModalPredictor wasn't able to find the best trial."
                     "Either all trials failed or"
                     "it's likely that the time is not enough to train a single epoch for trials."
                 )
@@ -591,7 +603,7 @@ class MultiModalPredictor:
             cleanup_trials(save_path, best_trial.trial_id)
             best_trial_path = os.path.join(save_path, best_trial.trial_id)
             # reload the predictor metadata
-            predictor = AutoMMPredictor._load_metadata(predictor=self, path=best_trial_path)
+            predictor = MultiModalPredictor._load_metadata(predictor=self, path=best_trial_path)
             # construct the model
             model = create_model(
                 config=predictor._config,
@@ -650,17 +662,15 @@ class MultiModalPredictor:
 
     def _setup_distillation(
         self,
-        teacher_predictor: Union[str, AutoMMPredictor],
+        teacher_predictor: Union[str, MultiModalPredictor],
     ):
         """
         Prepare for distillation. It verifies whether the student and teacher predictors have consistent
         configurations. If teacher and student have duplicate model names, it modifies teacher's model names.
-
         Parameters
         ----------
         teacher_predictor
             The teacher predictor in knowledge distillation.
-
         Returns
         -------
         teacher_model
@@ -684,7 +694,7 @@ class MultiModalPredictor:
         """
         logger.debug("setting up distillation...")
         if isinstance(teacher_predictor, str):
-            teacher_predictor = AutoMMPredictor.load(teacher_predictor)
+            teacher_predictor = MultiModalPredictor.load(teacher_predictor)
 
         # verify that student and teacher configs are consistent.
         assert self._problem_type == teacher_predictor._problem_type
@@ -753,11 +763,11 @@ class MultiModalPredictor:
         rkd_loss_func = RKDLoss(rkd_distance_loss_weight, rkd_angle_loss_weight)
 
         # turn on returning column information in data processors
-        self._data_processors = turn_on_off_feature_column_info(
+        turn_on_off_feature_column_info(
             data_processors=self._data_processors,
             flag=True,
         )
-        teacher_predictor._data_processors = turn_on_off_feature_column_info(
+        turn_on_off_feature_column_info(
             data_processors=teacher_predictor._data_processors,
             flag=True,
         )
