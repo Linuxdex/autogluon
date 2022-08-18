@@ -3,8 +3,7 @@ from typing import List, Optional, Union
 import pandas as pd
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
-import pandas as pd
-from typing import Optional, Union, List
+
 from ..constants import PREDICT, TEST, TRAIN, VAL
 from .collator import Dict, Few_shot_Dict
 from .dataset import BaseDataset, EpisodeDataset
@@ -218,10 +217,12 @@ class BaseDataModule(LightningDataModule):
         A "Dict" collator wrapping other collators.
         """
         collate_fn = {}
-        for per_data_processors_group in self.data_processors:
+        for per_preprocessor, per_data_processors_group in zip(self.df_preprocessor, self.data_processors):
             for per_modality in per_data_processors_group:
-                for per_model_processor in per_data_processors_group[per_modality]:
-                    collate_fn.update(per_model_processor.collate_fn())
+                per_modality_column_names = per_preprocessor.get_column_names(modality=per_modality)
+                if per_modality_column_names:
+                    for per_model_processor in per_data_processors_group[per_modality]:
+                        collate_fn.update(per_model_processor.collate_fn(per_modality_column_names))
         if self.is_few_shot:
             return Few_shot_Dict(collate_fn, nSupport=self.nSupport, nQuery=self.nQuery, nEpisode=self.nEpisode)
         else:
