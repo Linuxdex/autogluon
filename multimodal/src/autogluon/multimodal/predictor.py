@@ -1338,21 +1338,11 @@ class MultiModalPredictor:
         requires_label: bool,
     ):
 
-        required_columns = self._df_preprocessor.required_feature_names
-        if requires_label:
-            required_columns.append(self._df_preprocessor.label_column)
-        data = data_to_df(
+        data, df_preprocessor, data_processors = self._on_predict_start(
+            config=self._config,
             data=data,
-            required_columns=required_columns,
-            all_columns=self._df_preprocessor.all_column_names,
+            requires_label=requires_label,
         )
-
-        # For prediction data with no labels provided.
-        if not requires_label:
-            data_processors = copy.deepcopy(self._data_processors)
-            data_processors.pop(LABEL, None)
-        else:
-            data_processors = self._data_processors
 
         num_gpus = (
             math.floor(self._config.env.num_gpus)
@@ -1490,10 +1480,10 @@ class MultiModalPredictor:
             return ret
 
     def _on_predict_start(
-            self,
-            config: DictConfig,
-            data: Union[pd.DataFrame, dict, list],
-            requires_label: bool,
+        self,
+        config: DictConfig,
+        data: Union[pd.DataFrame, dict, list],
+        requires_label: bool,
     ):
         data = data_to_df(data=data)
 
@@ -1551,20 +1541,22 @@ class MultiModalPredictor:
             ret_type = PROBABILITY
         else:
             ret_type = LOGITS
+
         if hasattr(self._config, FEWSHOT):
-            logits_or_prob, y_true, label_list = self._predict(
+            outputs, y_true, label_list = self._predict(
                 data=data,
                 ret_type=ret_type,
                 requires_label=True,
             )
         else:
             label_list = None
-            y_true = None
-            logits_or_prob = self._predict(
+            outputs = self._predict(
                 data=data,
                 ret_type=ret_type,
                 requires_label=True,
             )
+        logits_or_prob = extract_from_output(ret_type=ret_type, outputs=outputs)
+
         metric_data = {}
         if self._problem_type in [BINARY, MULTICLASS]:
             if ret_type == LOGITS:
@@ -1583,8 +1575,7 @@ class MultiModalPredictor:
             inverse_categorical=True,
             fewshot_label_list=label_list,
         )
-        if y_true is None:
-            y_true = self._df_preprocessor.transform_label_for_metric(df=data)
+        y_true = self._df_preprocessor.transform_label_for_metric(df=data)
 
         metric_data.update(
             {
@@ -1617,9 +1608,37 @@ class MultiModalPredictor:
         else:
             return results
 
+    def _match_queries_and_candidates(
+        self,
+        query_data: Union[pd.DataFrame, dict, list],
+        candidate_data: Union[pd.DataFrame, dict, list],
+        return_prob: Optional[bool] = False,
+    ):
+        query_embeddings = self.extract_embedding(query_data, as_tensor=True)
+        assert (
+            len(query_embeddings) == 1
+        ), f"Multiple embedding types `{query_embeddings.keys()}` exist in query data. Please reduce them to one type."
+        query_embeddings = list(query_embeddings.values())[0]
+
+        candidate_embeddings = self.extract_embedding(candidate_data, as_tensor=True)
+        assert (
+            len(candidate_embeddings) == 1
+        ), f"Multiple embedding types `{candidate_embeddings.keys()}` exist in candidate data. Please reduce them to one type."
+        candidate_embeddings = list(candidate_embeddings.values())[0]
+
+        if return_prob:
+            ret = (100.0 * query_embeddings @ candidate_embeddings.T).float().softmax(dim=-1)
+        else:
+            ret = (query_embeddings @ candidate_embeddings.T).argmax(dim=-1)
+
+        ret = tensor_to_ndarray(ret)
+
+        return ret
+
     def predict(
         self,
         data: Union[pd.DataFrame, dict, list],
+        candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
         as_pandas: Optional[bool] = True,
     ):
         """
@@ -1630,6 +1649,8 @@ class MultiModalPredictor:
         data
              The data to make predictions for. Should contain same column names as training data and
               follow same format (except for the `label` column).
+        candidate_data
+            The candidate data from which to search the query data's matches.
         as_pandas
             Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
 
@@ -1675,7 +1696,8 @@ class MultiModalPredictor:
     def predict_proba(
         self,
         data: Union[pd.DataFrame, dict, list],
-        as_pandas: Optional[bool] = True,
+        candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
+        as_pandas: Optional[bool] = None,
         as_multiclass: Optional[bool] = True,
     ):
         """
@@ -1687,6 +1709,8 @@ class MultiModalPredictor:
         data
             The data to make predictions for. Should contain same column names as training data and
               follow same format (except for the `label` column).
+        candidate_data
+            The candidate data from which to search the query data's matches.
         as_pandas
             Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
         as_multiclass
@@ -1699,9 +1723,8 @@ class MultiModalPredictor:
         When as_multiclass is True, the output will always have shape (#samples, #classes).
         Otherwise, the output will have shape (#samples,)
         """
-        assert self._problem_type in [
-            BINARY,
-            MULTICLASS,
+        assert self._problem_type not in [
+            REGRESSION,
         ], f"Problem {self._problem_type} has no probability output."
 
         if hasattr(self._config, MATCHER):
@@ -1709,16 +1732,23 @@ class MultiModalPredictor:
         else:
             ret_type = LOGITS
 
-        logits_or_prob = self._predict(
-            data=data,
-            ret_type=ret_type,
-            requires_label=False,
-        )
-
-        if ret_type == LOGITS:
-            prob = self._logits_to_prob(logits_or_prob)
+        if candidate_data:
+            prob = self._match_queries_and_candidates(
+                query_data=data,
+                candidate_data=candidate_data,
+                return_prob=True,
+            )
         else:
-            prob = logits_or_prob.detach().cpu().float().numpy()
+            outputs = self._predict(
+                data=data,
+                requires_label=False,
+            )
+            logits_or_prob = extract_from_output(outputs=outputs, ret_type=ret_type)
+
+            if ret_type == LOGITS:
+                prob = logits_to_prob(logits_or_prob)
+            else:
+                prob = logits_or_prob
 
         if not as_multiclass:
             if self._problem_type == BINARY:
@@ -1728,13 +1758,17 @@ class MultiModalPredictor:
                     problem_type=self._problem_type,
                 )
                 prob = prob[:, pos_label]
-        if as_pandas:
+
+        if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
             prob = self._as_pandas(data=data, to_be_converted=prob)
+
         return prob
 
     def extract_embedding(
         self,
         data: Union[pd.DataFrame, dict, list],
+        return_masks: Optional[bool] = False,
+        as_tensor: Optional[bool] = False,
         as_pandas: Optional[bool] = False,
     ):
         """
@@ -1745,6 +1779,11 @@ class MultiModalPredictor:
         data
             The data to extract embeddings for. Should contain same column names as training dataset and
             follow same format (except for the `label` column).
+        return_masks
+            If true, returns a mask dictionary, whose keys are the same as those in the features dictionary.
+            If a sample has empty input in feature column `image_0`, the sample will has mask 0 under key `image_0`.
+        as_tensor
+            Whether to return a Pytorch tensor.
         as_pandas
             Whether to return the output as a pandas DataFrame (True) or numpy array (False).
 
@@ -1754,9 +1793,12 @@ class MultiModalPredictor:
         It will have shape (#samples, D) where the embedding dimension D is determined
         by the neural network's architecture.
         """
-        features = self._predict(
+        turn_on_off_feature_column_info(
+            data_processors=self._data_processors,
+            flag=True,
+        )
+        outputs = self._predict(
             data=data,
-            ret_type=FEATURES,
             requires_label=False,
         )
         if self._pipeline in [FEATURE_EXTRACTION, ZERO_SHOT_IMAGE_CLASSIFICATION]:
@@ -1768,13 +1810,18 @@ class MultiModalPredictor:
 
         if as_pandas:
             features = pd.DataFrame(features, index=data.index)
+            if return_masks:
+                masks = pd.DataFrame(masks, index=data.index)
 
-        return features
+        if return_masks:
+            return features, masks
+        else:
+            return features
 
     def _as_pandas(
-        self,
-        data: Union[pd.DataFrame, dict, list],
-        to_be_converted: np.ndarray,
+            self,
+            data: Union[pd.DataFrame, dict, list],
+            to_be_converted: np.ndarray,
     ):
         if isinstance(data, pd.DataFrame):
             index = data.index
@@ -1866,10 +1913,17 @@ class MultiModalPredictor:
             model_path = os.path.join(self._save_path, "model.ckpt")
             if os.path.isfile(model_path):
                 shutil.copy(model_path, path)
+            else:
+                # FIXME(?) Fix the saving logic
+                RuntimeError(
+                    f"Cannot find the model checkpoint in '{model_path}'. Have you removed the folder that "
+                    f"is created in .fit()? Currently, .save() won't function appropriately if that folder is "
+                    f"removed."
+                )
 
     @staticmethod
     def _load_metadata(
-        predictor: AutoMMPredictor,
+        predictor: MultiModalPredictor,
         path: str,
         resume: Optional[bool] = False,
         verbosity: Optional[int] = 3,
@@ -1908,7 +1962,6 @@ class MultiModalPredictor:
         except:  # backward compatibility. reconstruct the data processor in case something went wrong.
             data_processors = init_data_processors(
                 config=config,
-                df_preprocessor=df_preprocessor,
             )
 
         predictor._label_column = assets["label_column"]
