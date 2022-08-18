@@ -1539,7 +1539,6 @@ class MultiModalPredictor:
         if hasattr(self._config, FEWSHOT):
             outputs, y_true, label_list = self._predict(
                 data=data,
-                ret_type=ret_type,
                 requires_label=True,
             )
             label_list = torch.cat(label_list)
@@ -1549,7 +1548,6 @@ class MultiModalPredictor:
             y_true = None
             outputs = self._predict(
                 data=data,
-                ret_type=ret_type,
                 requires_label=True,
             )
         logits_or_prob = extract_from_output(ret_type=ret_type, outputs=outputs)
