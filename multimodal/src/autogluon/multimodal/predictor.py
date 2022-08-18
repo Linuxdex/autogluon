@@ -41,6 +41,7 @@ from .constants import (
     DEPRECATED_ZERO_SHOT,
     FEATURE_EXTRACTION,
     FEATURES,
+    FEWSHOT,
     GREEDY_SOUP,
     LABEL,
     LAST_CHECKPOINT,
@@ -71,6 +72,7 @@ from .data.infer_types import (
 )
 from .optimization.lit_distiller import DistillerLitModule
 from .optimization.lit_matcher import MatcherLitModule
+from .optimization.lit_few_shot import FewShotLitModule
 from .optimization.lit_module import LitModule
 from .optimization.rkd_loss import RKDLoss
 from .optimization.utils import get_loss_func, get_metric
