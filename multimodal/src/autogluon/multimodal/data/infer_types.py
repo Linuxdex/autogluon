@@ -1,10 +1,23 @@
-import logging
 import collections
-import pandas as pd
+import logging
 import warnings
+
+import pandas as pd
 import PIL
 from typing import Union, Optional, List, Dict, Tuple
-from ..constants import NULL, CATEGORICAL, NUMERICAL, TEXT, IMAGE_PATH, MULTICLASS, BINARY, REGRESSION, AUTOMM
+
+from ..constants import (
+    AUTOMM,
+    BINARY,
+    CATEGORICAL,
+    CLASSIFICATION,
+    IMAGE,
+    MULTICLASS,
+    NULL,
+    NUMERICAL,
+    REGRESSION,
+    TEXT,
+)
 
 logger = logging.getLogger(AUTOMM)
 
@@ -286,13 +299,89 @@ def infer_column_problem_types(
             column_types[col_name] = TEXT
         else:
             column_types[col_name] = CATEGORICAL
-    problem_type, output_shape = infer_problem_type_output_shape(
-        column_types=column_types,
-        label_column=label_columns[0],
-        data_df=train_df,
-        provided_problem_type=problem_type,
-    )
-    return column_types, problem_type, output_shape
+
+    if allowable_column_types and fallback_column_type:
+        column_types = set_fallback_column_type(
+            column_types=column_types,
+            allowable_column_types=allowable_column_types,
+            fallback_column_type=fallback_column_type,
+        )
+
+    return column_types
+
+
+def check_missing_values(
+    data: pd.DataFrame,
+    column_name: str,
+    split: Optional[str] = "",
+):
+    num_missing_values = data[column_name].isnull().sum()
+    if num_missing_values > 0:
+        raise ValueError(
+            f"Label column '{column_name}' contains missing values in the "
+            f"{split} dataframe. You may want to filter your data because "
+            "missing label is currently not supported."
+        )
+
+
+def infer_label_column_type_by_problem_type(
+    column_types: Dict,
+    label_columns: Union[str, List[str]],
+    problem_type: str,
+    data: Optional[pd.DataFrame] = None,
+    valid_data: Optional[pd.DataFrame] = None,
+    allowable_label_types: Optional[List[str]] = (CATEGORICAL, NUMERICAL),
+    fallback_label_type: Optional[str] = CATEGORICAL,
+):
+    """
+    Infer the label column types based on problem type.
+
+    Parameters
+    ----------
+    column_types
+        Types of columns in a pd.DataFrame.
+    label_columns
+        The label columns in a pd.DataFrame.
+    problem_type
+        Type of problem.
+    data
+        A pd.DataFrame.
+    valid_data
+        A validation pd.DataFrame.
+    allowable_label_types
+        Which label types are allowed.
+    fallback_label_type
+        If a label type is not within the allowable_label_types, replace it with this fallback_label_type.
+
+    Returns
+    -------
+    Column types with the label columns' types inferred from the problem type.
+    """
+    if isinstance(label_columns, str):
+        label_columns = [label_columns]
+
+    for col_name in label_columns:
+        # Make sure the provided label columns are in the dataframe.
+        assert (
+            col_name in column_types
+        ), f"Column {col_name} is not in {column_types.keys()}. Make sure calling `infer_column_types()` first."
+        if data is not None:
+            check_missing_values(data=data, column_name=col_name, split="training")
+        if valid_data is not None:
+            check_missing_values(data=valid_data, column_name=col_name, split="validation")
+        if column_types[col_name] == NULL:
+            raise ValueError(
+                f"Label column '{col_name}' contains only one label class. Make sure it has at least two label classes."
+            )
+        if problem_type in [MULTICLASS, BINARY, CLASSIFICATION]:
+            column_types[col_name] = CATEGORICAL
+        elif problem_type == REGRESSION:
+            column_types[col_name] = NUMERICAL
+
+        if column_types[col_name] not in allowable_label_types:
+            column_types[col_name] = fallback_label_type
+
+    return column_types
 
 
 def infer_problem_type_output_shape(

@@ -1,7 +1,9 @@
-from typing import Optional, Union, Tuple, List, Dict
+import re
+from typing import Dict, List, Optional, Tuple
+
 import torch
 from torch import nn
-from ..constants import MASKS, COLUMN_FEATURES, FEATURES
+
 from .lora_layers import LoRALinear
 
 
@@ -426,3 +428,28 @@ def inject_lora_to_linear_layer(
             setattr(model, n, lora_layer)
 
     return model  # return model to enable method chaining
+
+
+def get_model_head(model: nn.Module):
+    """
+    Return the model's head. Different models may have different head names.
+
+    Parameters
+    ----------
+    model
+        A Pytorch model.
+
+    Returns
+    -------
+    The model's head.
+    """
+    if hasattr(model, "head"):
+        head = model.head  # move the head outside
+    elif hasattr(model, "last_linear"):
+        head = model.last_linear
+    elif hasattr(model, "fc"):
+        head = model.fc
+    else:
+        raise ValueError(f"Model {type(model)} doesn't have head. Need to check its implementation.")
+
+    return head

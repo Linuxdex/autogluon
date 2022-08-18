@@ -2,10 +2,10 @@ import logging
 import torch
 import numpy as np
 import pandas as pd
-import random
 from typing import List
+
+from ..constants import AUTOMM, GET_ITEM_ERROR_RETRY
 from .preprocess_dataframe import MultiModalFeaturePreprocessor
-from ..constants import GET_ITEM_ERROR_RETRY, AUTOMM
 
 logger = logging.getLogger(AUTOMM)
 

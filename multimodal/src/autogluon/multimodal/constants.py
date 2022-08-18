@@ -9,6 +9,12 @@ IMAGE_PATH = "image_path"
 BINARY = "binary"
 MULTICLASS = "multiclass"
 REGRESSION = "regression"
+DEPRECATED_ZERO_SHOT = "zero_shot"
+
+# Pipelines
+FEATURE_EXTRACTION = "feature_extraction"
+ZERO_SHOT_IMAGE_CLASSIFICATION = "zero_shot_image_classification"
+OBJECT_DETECTION = "object_detection"
 
 # Input keys
 IMAGE = "image"
@@ -28,6 +34,7 @@ FEATURES = "features"
 MASKS = "masks"
 PROBABILITY = "probability"
 COLUMN_FEATURES = "column_features"
+BBOX = "bbox"
 
 
 # Metric
@@ -72,6 +79,7 @@ PREDICT = "predict"
 # Model sources
 HUGGINGFACE = "huggingface"
 TIMM = "timm"
+MMDET = "mmdet"
 
 # Modality keys. may need to update here if new modality keys are added in above.
 ALL_MODALITIES = [IMAGE, TEXT, CATEGORICAL, NUMERICAL]
@@ -126,6 +134,7 @@ NUMERICAL_TRANSFORMER = "numerical_transformer"
 CATEGORICAL_TRANSFORMER = "categorical_transformer"
 FUSION_MLP = "fusion_mlp"
 FUSION_TRANSFORMER = "fusion_transformer"
+MMDET_IMAGE = "mmdet_image"
 
 # metric learning loss type
 CONTRASTIVE_LOSS = "contrastive_loss"

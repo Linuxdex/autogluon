@@ -1,25 +1,18 @@
 import logging
-import pandas as pd
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-import torch
-from torch.nn.modules.loss import _Loss
-import collections
-from typing import Callable, Iterator, Union, Optional, List, Any, Dict
+import pandas as pd
 from nptyping import NDArray
-from autogluon.features import CategoryFeatureGenerator
-from omegaconf import OmegaConf
-from sklearn.pipeline import Pipeline
+from omegaconf import DictConfig, OmegaConf
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import (
-    StandardScaler,
-    MinMaxScaler,
-    LabelEncoder,
-)
-from sklearn.base import (
-    TransformerMixin,
-    BaseEstimator,
-)
-from ..constants import CATEGORICAL, NUMERICAL, TEXT, IMAGE_PATH, NULL, AUTOMM, FEWSHOT
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler
+
+from autogluon.features import CategoryFeatureGenerator
+
+from ..constants import AUTOMM, CATEGORICAL, IMAGE, IMAGE_PATH, LABEL, NULL, NUMERICAL, TEXT
 
 logger = logging.getLogger(AUTOMM)
 
@@ -50,6 +43,8 @@ class MultiModalFeaturePreprocessor(TransformerMixin, BaseEstimator):
             Name of the label column in pd.DataFrame.
         label_generator
             A sklearn LabelEncoder instance.
+        fewshot
+            Whether to be a fewshot task.
         """
         self._column_types = column_types
         self._label_column = label_column

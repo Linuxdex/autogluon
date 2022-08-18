@@ -1,31 +1,30 @@
-import tempfile
 import copy
+import os
 import pickle
+import shutil
+import tempfile
+
+from test_predictor import verify_predictor_save_load
+from unittest_datasets import AEDataset, HatefulMeMesDataset, PetFinderDataset
 
 from autogluon.multimodal import MultiModalPredictor
 from autogluon.multimodal.constants import (
-    MODEL,
-    DATA,
-    OPTIMIZATION,
-    ENVIRONMENT,
-    DISTILLER,
-    BINARY,
-    MULTICLASS,
-    UNIFORM_SOUP,
-    GREEDY_SOUP,
     BEST,
-    NORM_FIT,
+    BINARY,
     BIT_FIT,
+    DATA,
+    DISTILLER,
+    ENVIRONMENT,
+    GREEDY_SOUP,
     LORA,
     LORA_BIAS,
     LORA_NORM,
+    MODEL,
+    MULTICLASS,
+    NORM_FIT,
+    OPTIMIZATION,
+    UNIFORM_SOUP,
 )
-from unittest_datasets import (
-    PetFinderDataset,
-    HatefulMeMesDataset,
-    AEDataset,
-)
-from test_predictor import verify_predictor_save_load
 
 ALL_DATASETS = {
     "petfinder": PetFinderDataset,
@@ -60,10 +59,12 @@ def test_mixup():
     }
 
     with tempfile.TemporaryDirectory() as save_path:
+        if os.path.isdir(save_path):
+            shutil.rmtree(save_path)
         predictor.fit(
             train_data=dataset.train_df,
             config=config,
-            time_limit=30,
+            time_limit=10,
             save_path=save_path,
             hyperparameters=hyperparameters,
         )
@@ -99,6 +100,8 @@ def test_textagumentor_deepcopy():
     }
 
     with tempfile.TemporaryDirectory() as save_path:
+        if os.path.isdir(save_path):
+            shutil.rmtree(save_path)
         predictor.fit(
             train_data=dataset.train_df,
             config=config,
@@ -159,10 +162,12 @@ def test_trivialaugment():
     }
 
     with tempfile.TemporaryDirectory() as save_path:
+        if os.path.isdir(save_path):
+            shutil.rmtree(save_path)
         predictor.fit(
             train_data=dataset.train_df,
             config=config,
-            time_limit=30,
+            time_limit=10,
             save_path=save_path,
             hyperparameters=hyperparameters,
         )
