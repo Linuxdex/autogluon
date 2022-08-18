@@ -1271,7 +1271,7 @@ class MultiModalPredictor:
 
                     ingredients = [top_k_model_paths[0]]
                     self._model = self._load_state_dict(
-                        model=self._model,
+                        model=model,
                         path=top_k_model_paths[0],
                         prefix=prefix,
                     )
@@ -1281,7 +1281,7 @@ class MultiModalPredictor:
                             checkpoint_paths=ingredients + [top_k_model_paths[i]],
                         )
                         self._model = self._load_state_dict(
-                            model=model,
+                            model=self._model,
                             state_dict=cand_avg_state_dict,
                             prefix=prefix,
                         )
@@ -1340,7 +1340,6 @@ class MultiModalPredictor:
     def _predict(
         self,
         data: Union[pd.DataFrame, dict, list],
-        ret_type: str,
         requires_label: bool,
     ):
 
