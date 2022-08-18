@@ -15,6 +15,7 @@ class NumericalProcessor:
     def __init__(
         self,
         prefix: str,
+        numerical_column_names: List[str],
         merge: Optional[str] = "concat",
         requires_column_info: bool = False,
     ):
@@ -23,6 +24,8 @@ class NumericalProcessor:
         ----------
         prefix
             The prefix connecting a processor to its corresponding model.
+        numerical_column_names
+            Numerical column names in a multimodal pd.DataFrame.
         merge
             How to merge numerical features from multiple columns in a multimodal pd.DataFrame.
             Currently, it only supports one choice:
@@ -32,6 +35,7 @@ class NumericalProcessor:
             Whether to require feature column information in dataloader.
         """
         self.prefix = prefix
+        self.numerical_column_names = numerical_column_names
         self.merge = merge
         self.requires_column_info = requires_column_info
 
@@ -43,7 +47,7 @@ class NumericalProcessor:
     def numerical_column_prefix(self):
         return f"{self.numerical_key}_{COLUMN}"
 
-    def collate_fn(self, numerical_column_names: List) -> Dict:
+    def collate_fn(self) -> Dict:
         """
         Collate individual samples into a batch. Here it stacks numerical features.
         This function will be used when creating Pytorch DataLoader.
@@ -54,8 +58,7 @@ class NumericalProcessor:
         """
         fn = {}
         if self.requires_column_info:
-            assert numerical_column_names, "Empty numerical column names."
-            for col_name in numerical_column_names:
+            for col_name in self.numerical_column_names:
                 fn[f"{self.numerical_column_prefix}_{col_name}"] = Stack()
 
         fn[self.numerical_key] = Stack()

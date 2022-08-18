@@ -280,3 +280,79 @@ class Dict:
         for k, ele_fn in self._fn_dict.items():
             ret[k] = ele_fn([ele[k] for ele in data])
         return ret
+
+class Few_shot_Dict:
+    """
+    The Dict for few-shot learning.
+    The dict includes the tensorsupport, labelsupport, tensorquery and labelquery.
+    The tensorsupport and tensorquery wrap multiple collate functions together and apply it to merge inputs from a dict.
+    The labelsupport and labelquery stack the few-shot labels to construct the batch.
+
+    Parameters
+    ----------
+    fn_dict
+        A dictionary that contains the key-->collate function mapping.
+    nSupport
+        Number of samples per class in the support set.
+    nQuery
+        Number of samples per class in the query set.
+    nEpisode
+        Number of episodes.
+    """
+
+    def __init__(self, fn_dict, nSupport, nQuery, nEpisode):
+        if not isinstance(fn_dict, dict):
+            raise ValueError(f"Input must be a dictionary! type of input={type(fn_dict)}")
+        for fn in fn_dict.values():
+            if not hasattr(fn, "__call__"):
+                raise ValueError("Elements of the dictionary must be callable!")
+        self._fn_dict = fn_dict
+        self._nSupport = nSupport
+        self._nQuery = nQuery
+        self._nEpisode = nEpisode
+
+    def __call__(self, data):
+        """
+        Parameters
+        ----------
+        data
+            The samples to collate. Each sample should be a dictionary
+
+        Returns
+        -------
+        The resulting dictionary that stores the merged samples for support and query.
+        """
+
+        support = list()
+        labelsupport = list()
+        query = list()
+        labelquery = list()
+        for perdata in data:
+            data_support = perdata["tensorsupport"]
+            label_support = perdata["labelsupport"]
+            data_query = perdata["tensorquery"]
+            label_query = perdata["labelquery"]
+            per_support = dict()
+            for k, ele_fn in self._fn_dict.items():
+                per_support[k] = ele_fn([ele[k] for ele in data_support])
+            per_query = dict()
+            for k, ele_fn in self._fn_dict.items():
+                per_query[k] = ele_fn([ele[k] for ele in data_query])
+            support.append(per_support)
+            labelsupport.append(label_support)
+            query.append(per_query)
+            labelquery.append(label_query)
+        ret_support = dict()
+        for k, ele_fn in self._fn_dict.items():
+            ret_support[k] = ele_fn([ele[k] for ele in support])
+        ret_query = dict()
+        for k, ele_fn in self._fn_dict.items():
+            ret_query[k] = ele_fn([ele[k] for ele in query])
+        ret_labelsupport = _stack_arrs(labelsupport)
+        ret_labelquery = _stack_arrs(labelquery)
+        return {
+            "tensorsupport": ret_support,
+            "labelsupport": ret_labelsupport,
+            "tensorquery": ret_query,
+            "labelquery": ret_labelquery,
+        }

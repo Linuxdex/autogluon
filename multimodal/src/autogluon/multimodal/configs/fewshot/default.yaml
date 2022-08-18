@@ -1,0 +1,12 @@
+fewshot:
+  nway: 5  #Number of classes in the few-shot episode.
+  nshot: 1  #Number of samples per class in the support set.
+  nqry: 5  #Number of samples per class in the query set.
+  nepisode: 2000  #Number of episodes.
+  train_model: "protonet"  #The model for training
+  predict_model: "protonet_finetune"  #The model for prediction
+  protonet_finetune:  #The pramameters for protonet-fintune
+    num_iters: 5  #The max training epoches
+    lr: 1e-5  #The learning rate.
+    aug_prob: 0.9  #The probability of augmentations
+    aug_types: ["color", "translation"]  #The types of augmentation.(include "color, offset, offset_h, offset_v, translation, cutout")

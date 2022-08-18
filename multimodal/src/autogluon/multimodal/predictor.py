@@ -14,6 +14,8 @@ import yaml
 import torch
 from torch import nn
 from torch.nn.modules.loss import _Loss
+import torch.nn.functional as F
+import torchmetrics
 from omegaconf import OmegaConf, DictConfig
 import operator
 import pytorch_lightning as pl
@@ -29,7 +31,6 @@ from .constants import (
     LABEL,
     BINARY,
     MULTICLASS,
-    CLASSIFICATION,
     REGRESSION,
     Y_PRED,
     Y_PRED_PROB,
@@ -52,18 +53,12 @@ from .constants import (
     DATA,
     PROBABILITY,
     MATCHER,
-    COLUMN_FEATURES,
-    MASKS,
-    ZERO_SHOT,
+    FEWSHOT,
 )
 
 from .data.datamodule import BaseDataModule
-from .data.infer_types import (
-    infer_column_types,
-    infer_label_column_type_by_problem_type,
-    infer_problem_type_output_shape,
-)
-
+from .data.infer_types import infer_column_problem_types
+from .data.preprocess_dataframe import MultiModalFeaturePreprocessor
 
 from .utils import (
     create_model,
@@ -89,13 +84,7 @@ from .utils import (
     get_mixup,
     CustomUnpickler,
     is_interactive,
-    AutoMMModelCheckpoint,
     data_to_df,
-    logits_to_prob,
-    extract_from_output,
-    init_zero_shot,
-    tensor_to_ndarray,
-    infer_dtypes_by_model_names,
 )
 from .optimization.utils import (
     get_metric,
@@ -103,12 +92,37 @@ from .optimization.utils import (
     update_config_by_rules,
 )
 from .optimization.lit_module import LitModule
+from .optimization.lit_few_shot import FewShotLitModule
 from .optimization.lit_distiller import DistillerLitModule
 from .optimization.lit_matcher import MatcherLitModule
 
 from . import version as ag_version
 
 logger = logging.getLogger(AUTOMM)
+
+
+class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
+    """
+    Class that inherits pl.callbacks.ModelCheckpoint. The purpose is to resolve the potential issues in lightning.
+
+    - Issue1:
+
+    It solves the issue described in https://github.com/PyTorchLightning/pytorch-lightning/issues/5582.
+    For ddp_spawn, the checkpoint_callback.best_k_models will be empty.
+    Here, we resolve it by storing the best_models to "SAVE_DIR/best_k_models.yaml".
+
+    """
+
+    def _update_best_and_save(
+        self,
+        current: torch.Tensor,
+        trainer: "pl.Trainer",
+        monitor_candidates: Dict[str, _METRIC],
+    ) -> None:
+        super(AutoMMModelCheckpoint, self)._update_best_and_save(
+            current=current, trainer=trainer, monitor_candidates=monitor_candidates
+        )
+        self.to_yaml()
 
 
 class MultiModalPredictor:
@@ -124,10 +138,9 @@ class MultiModalPredictor:
 
     def __init__(
         self,
-        label: Optional[str] = None,
+        label: str,
         problem_type: Optional[str] = None,
         eval_metric: Optional[str] = None,
-        hyperparameters: Optional[dict] = None,
         path: Optional[str] = None,
         verbosity: Optional[int] = 3,
         warn_if_exist: Optional[bool] = True,
@@ -146,21 +159,6 @@ class MultiModalPredictor:
         eval_metric
             Evaluation metric name. If `eval_metric = None`, it is automatically chosen based on `problem_type`.
             Defaults to 'accuracy' for binary and multiclass classification, 'root_mean_squared_error' for regression.
-        hyperparameters
-            This is to override some default configurations.
-            For example, changing the text and image backbones can be done by formatting:
-
-            a string
-            hyperparameters = "model.hf_text.checkpoint_name=google/electra-small-discriminator model.timm_image.checkpoint_name=swin_small_patch4_window7_224"
-
-            or a list of strings
-            hyperparameters = ["model.hf_text.checkpoint_name=google/electra-small-discriminator", "model.timm_image.checkpoint_name=swin_small_patch4_window7_224"]
-
-            or a dictionary
-            hyperparameters = {
-                            "model.hf_text.checkpoint_name": "google/electra-small-discriminator",
-                            "model.timm_image.checkpoint_name": "swin_small_patch4_window7_224",
-                        }
         path
             Path to directory where models and intermediate outputs should be saved.
             If unspecified, a time-stamped folder called "AutogluonAutoMM/ag-[TIMESTAMP]"
@@ -217,9 +215,6 @@ class MultiModalPredictor:
         self._warn_if_exist = warn_if_exist
         self._enable_progress_bar = enable_progress_bar if enable_progress_bar is not None else True
 
-        if problem_type is not None and problem_type.lower() == ZERO_SHOT:
-            self._config, self._model, self._data_processors = init_zero_shot(hyperparameters=hyperparameters)
-
     @property
     def path(self):
         return self._save_path
@@ -256,12 +251,12 @@ class MultiModalPredictor:
         hyperparameters: Optional[Union[str, Dict, List[str]]] = None,
         column_types: Optional[dict] = None,
         holdout_frac: Optional[float] = None,
-        teacher_predictor: Union[str, MultiModalPredictor] = None,
+        teacher_predictor: Union[str, AutoMMPredictor] = None,
         seed: Optional[int] = 123,
         hyperparameter_tune_kwargs: Optional[dict] = None,
     ):
         """
-        Fit MultiModalPredictor predict label column of a dataframe based on the other columns,
+        Fit AutoMMPredictor predict label column of a dataframe based on the other columns,
         which may contain image path, text, numeric, or categorical features.
 
         Parameters
@@ -361,7 +356,7 @@ class MultiModalPredictor:
 
         Returns
         -------
-        An "MultiModalPredictor" object (itself).
+        An "AutoMMPredictor" object (itself).
         """
         if hyperparameter_tune_kwargs is not None:
             # TODO: can we support hyperparameters being the same format as regular training?
@@ -400,7 +395,7 @@ class MultiModalPredictor:
 
         # Generate general info that's not config specific
         if tuning_data is None:
-            if self._problem_type in [BINARY, MULTICLASS, CLASSIFICATION]:
+            if self._problem_type in [BINARY, MULTICLASS]:
                 stratify = train_data[self._label_column]
             else:
                 stratify = None
@@ -415,24 +410,12 @@ class MultiModalPredictor:
                 random_state=np.random.RandomState(seed),
             )
 
-        column_types = infer_column_types(
-            data=train_data,
-            valid_data=tuning_data,
-            label_columns=self._label_column,
-            provided_column_types=column_types,
-        )
-        column_types = infer_label_column_type_by_problem_type(
-            column_types=column_types,
+        column_types, problem_type, output_shape = infer_column_problem_types(
+            train_df=train_data,
+            valid_df=tuning_data,
             label_columns=self._label_column,
             problem_type=self._problem_type,
-            data=train_data,
-            valid_data=tuning_data,
-        )
-        problem_type, output_shape = infer_problem_type_output_shape(
-            label_column=self._label_column,
-            column_types=column_types,
-            data=train_data,
-            provided_problem_type=self._problem_type,
+            provided_column_types=column_types,
         )
 
         logger.debug(f"column_types: {column_types}")
@@ -448,9 +431,6 @@ class MultiModalPredictor:
             column_types = self._column_types
 
         if self._problem_type is not None:
-            if self._problem_type == CLASSIFICATION:
-                # Set the problem type to be inferred problem type
-                self._problem_type = problem_type
             assert self._problem_type == problem_type, (
                 f"Inferred problem type {problem_type} is different from " f"the previous {self._problem_type}"
             )
@@ -514,7 +494,7 @@ class MultiModalPredictor:
         return self
 
     def _hyperparameter_tune(self, hyperparameter_tune_kwargs, resources, **_fit_args):
-        from autogluon.core.hpo.ray_hpo import (
+        from autogluon.core.hpo import (
             run,
             cleanup_trials,
             cleanup_checkpoints,
@@ -564,7 +544,7 @@ class MultiModalPredictor:
             )
             if best_trial is None:
                 raise ValueError(
-                    "MultiModalPredictor wasn't able to find the best trial."
+                    "AutoMMPredictor wasn't able to find the best trial."
                     "Either all trials failed or"
                     "it's likely that the time is not enough to train a single epoch for trials."
                 )
@@ -573,7 +553,7 @@ class MultiModalPredictor:
             cleanup_trials(save_path, best_trial.trial_id)
             best_trial_path = os.path.join(save_path, best_trial.trial_id)
             # reload the predictor metadata
-            predictor = MultiModalPredictor._load_metadata(predictor=self, path=best_trial_path)
+            predictor = AutoMMPredictor._load_metadata(predictor=self, path=best_trial_path)
             # construct the model
             model = create_model(
                 config=predictor._config,
@@ -632,7 +612,7 @@ class MultiModalPredictor:
 
     def _setup_distillation(
         self,
-        teacher_predictor: Union[str, MultiModalPredictor],
+        teacher_predictor: Union[str, AutoMMPredictor],
     ):
         """
         Prepare for distillation. It verifies whether the student and teacher predictors have consistent
@@ -660,7 +640,7 @@ class MultiModalPredictor:
         """
         logger.debug("setting up distillation...")
         if isinstance(teacher_predictor, str):
-            teacher_predictor = MultiModalPredictor.load(teacher_predictor)
+            teacher_predictor = AutoMMPredictor.load(teacher_predictor)
 
         # verify that student and teacher configs are consistent.
         assert self._problem_type == teacher_predictor._problem_type
@@ -693,11 +673,11 @@ class MultiModalPredictor:
             raise ValueError(f"Unknown soft_label_loss_type: {self._config.distiller.soft_label_loss_type}")
 
         # turn on returning column information in data processors
-        turn_on_off_feature_column_info(
+        self._data_processors = turn_on_off_feature_column_info(
             data_processors=self._data_processors,
             flag=True,
         )
-        turn_on_off_feature_column_info(
+        teacher_predictor._data_processors = turn_on_off_feature_column_info(
             data_processors=teacher_predictor._data_processors,
             flag=True,
         )
@@ -743,7 +723,7 @@ class MultiModalPredictor:
         presets: Optional[str] = None,
         config: Optional[dict] = None,
         hyperparameters: Optional[Union[str, Dict, List[str]]] = None,
-        teacher_predictor: Union[str, MultiModalPredictor] = None,
+        teacher_predictor: Union[str, AutoMMPredictor] = None,
         hpo_mode: bool = False,
         **hpo_kwargs,
     ):
@@ -769,6 +749,7 @@ class MultiModalPredictor:
                 label_column=self._label_column,
                 train_df_x=train_df.drop(columns=self._label_column),
                 train_df_y=train_df[self._label_column],
+                fewshot=hasattr(config, FEWSHOT),
             )
         else:  # continuing training
             df_preprocessor = self._df_preprocessor
@@ -778,6 +759,7 @@ class MultiModalPredictor:
         if self._data_processors is None:
             data_processors = init_data_processors(
                 config=config,
+                df_preprocessor=df_preprocessor,
             )
         else:  # continuing training
             data_processors = self._data_processors
@@ -836,12 +818,14 @@ class MultiModalPredictor:
         if hasattr(config, MATCHER):
             warnings.warn("Matching is experimental. We may change its behaviors in future.", UserWarning)
             match_label = self._df_preprocessor.label_generator.transform([self._config.matcher.match_label]).item()
-            turn_on_off_feature_column_info(
+            data_processors = turn_on_off_feature_column_info(
                 data_processors=data_processors,
                 flag=True,
             )
         else:
             match_label = None
+
+        is_fewshot = hasattr(config, FEWSHOT)
 
         if max_time == timedelta(seconds=0):
             self._top_k_average(
@@ -849,6 +833,7 @@ class MultiModalPredictor:
                 save_path=save_path,
                 minmax_mode=minmax_mode,
                 is_distill=False,
+                is_fewshot=is_fewshot,
                 top_k_average_method=config.optimization.top_k_average_method,
                 val_df=val_df,
                 validation_metric_name=validation_metric_name,
@@ -890,6 +875,7 @@ class MultiModalPredictor:
             num_workers=config.env.num_workers,
             train_data=train_df,
             val_data=val_df,
+            few_shot=getattr(config, FEWSHOT),
         )
         optimization_kwargs = dict(
             optim_type=config.optimization.optim_type,
@@ -930,6 +916,17 @@ class MultiModalPredictor:
                 model=model,
                 matches=config.matcher.matches,
                 match_label=match_label,
+                **metrics_kwargs,
+                **optimization_kwargs,
+            )
+        elif is_fewshot:
+            task = FewShotLitModule(
+                model=model,
+                loss_func=loss_func,
+                efficient_finetune=OmegaConf.select(config, "optimization.efficient_finetune"),
+                mixup_fn=mixup_fn,
+                mixup_off_epoch=OmegaConf.select(config, "data.mixup.turn_off_epoch"),
+                train_model=OmegaConf.select(config, "fewshot.train_model"),
                 **metrics_kwargs,
                 **optimization_kwargs,
             )
@@ -998,10 +995,10 @@ class MultiModalPredictor:
 
         if is_interactive() and num_gpus > 1:
             warnings.warn(
-                "Interactive environment is detected. Currently, MultiModalPredictor does not support multi-gpu "
+                "Interactive environment is detected. Currently, AutoMMPredictor does not support multi-gpu "
                 "training under an interactive environment due to the limitation of ddp / ddp_spawn strategies "
                 "in PT Lightning. Thus, we switch to single gpu training. For multi-gpu training, you need to execute "
-                "MultiModalPredictor in a script.",
+                "AutoMMPredictor in a script.",
                 UserWarning,
             )
             num_gpus = 1
@@ -1009,7 +1006,7 @@ class MultiModalPredictor:
         if num_gpus == 0:  # CPU only training
             warnings.warn(
                 "Only CPU is detected in the instance. "
-                "MultiModalPredictor will be trained with CPU only. "
+                "AutoMMPredictor will be trained with CPU only. "
                 "This may results in slow training speed. "
                 "Consider to switch to an instance with GPU support.",
                 UserWarning,
@@ -1074,7 +1071,6 @@ class MultiModalPredictor:
                 log_every_n_steps=OmegaConf.select(config, "optimization.log_every_n_steps", default=10),
                 enable_progress_bar=enable_progress_bar,
                 fast_dev_run=config.env.fast_dev_run,
-                track_grad_norm=OmegaConf.select(config, "environment.track_grad_norm", default=2),
                 val_check_interval=config.optimization.val_check_interval,
             )
 
@@ -1101,6 +1097,7 @@ class MultiModalPredictor:
                     save_path=save_path,
                     minmax_mode=minmax_mode,
                     is_distill=is_distill,
+                    is_fewshot=is_fewshot,
                     top_k_average_method=config.optimization.top_k_average_method,
                     val_df=val_df,
                     validation_metric_name=validation_metric_name,
@@ -1114,6 +1111,7 @@ class MultiModalPredictor:
         save_path,
         minmax_mode,
         is_distill,
+        is_fewshot,
         top_k_average_method,
         val_df,
         validation_metric_name,
@@ -1132,6 +1130,8 @@ class MultiModalPredictor:
 
         if is_distill:
             prefix = "student_model."
+        elif is_fewshot:
+            prefix = "model.backbone."
         else:
             prefix = "model."
 
@@ -1168,7 +1168,7 @@ class MultiModalPredictor:
                             checkpoint_paths=ingredients + [top_k_model_paths[i]],
                         )
                         self._model = self._load_state_dict(
-                            model=self._model,
+                            model=model,
                             state_dict=cand_avg_state_dict,
                             prefix=prefix,
                         )
@@ -1227,14 +1227,25 @@ class MultiModalPredictor:
     def _predict(
         self,
         data: Union[pd.DataFrame, dict, list],
+        ret_type: str,
         requires_label: bool,
-    ) -> List[Dict]:
+    ):
 
-        data, df_preprocessor, data_processors = self._on_predict_start(
-            config=self._config,
+        required_columns = self._df_preprocessor.required_feature_names
+        if requires_label:
+            required_columns.append(self._df_preprocessor.label_column)
+        data = data_to_df(
             data=data,
-            requires_label=requires_label,
+            required_columns=required_columns,
+            all_columns=self._df_preprocessor.all_column_names,
         )
+
+        # For prediction data with no labels provided.
+        if not requires_label:
+            data_processors = copy.deepcopy(self._data_processors)
+            data_processors.pop(LABEL, None)
+        else:
+            data_processors = self._data_processors
 
         num_gpus = (
             self._config.env.num_gpus if isinstance(self._config.env.num_gpus, int) else len(self._config.env.num_gpus)
@@ -1245,7 +1256,7 @@ class MultiModalPredictor:
         if num_gpus == 0:  # CPU only prediction
             warnings.warn(
                 "Only CPU is detected in the instance. "
-                "MultiModalPredictor will predict with CPU only. "
+                "AutoMMPredictor will predict with CPU only. "
                 "This may results in slow prediction speed. "
                 "Consider to switch to an instance with GPU support.",
                 UserWarning,
@@ -1276,16 +1287,17 @@ class MultiModalPredictor:
             strategy = None
 
         if hasattr(self._config, MATCHER):
-            turn_on_off_feature_column_info(
+            data_processors = turn_on_off_feature_column_info(
                 data_processors=data_processors,
                 flag=True,
             )
         predict_dm = BaseDataModule(
-            df_preprocessor=df_preprocessor,
+            df_preprocessor=self._df_preprocessor,
             data_processors=data_processors,
             per_gpu_batch_size=batch_size,
             num_workers=self._config.env.num_workers_evaluation,
             predict_data=data,
+            few_shot=getattr(self._config, FEWSHOT),
         )
         if hasattr(self._config, MATCHER):
             match_label = self._df_preprocessor.label_generator.transform([self._config.matcher.match_label]).item()
@@ -1293,6 +1305,13 @@ class MultiModalPredictor:
                 model=self._model,
                 matches=self._config.matcher.matches,
                 match_label=match_label,
+            )
+        elif hasattr(self._config, FEWSHOT):
+            task = FewShotLitModule(
+                model=self._model,
+                loss_func=self._loss_func if hasattr(self, "_loss_func") else None,
+                predict_model=OmegaConf.select(self._config, "fewshot.predict_model"),
+                predict_model_args=OmegaConf.select(self._config, "fewshot." + OmegaConf.select(self._config, "fewshot.predict_model"))
             )
         else:
             task = LitModule(
@@ -1320,7 +1339,6 @@ class MultiModalPredictor:
                 benchmark=False,
                 enable_progress_bar=self._enable_progress_bar,
                 deterministic=self._config.env.deterministic,
-                max_epochs=-1,  # Add max_epochs to disable warning
                 logger=False,
             )
 
@@ -1331,46 +1349,43 @@ class MultiModalPredictor:
                     "Consider increasing the value of the `num_workers` argument` "
                     ".* in the `DataLoader` init to improve performance.*",
                 )
-                outputs = evaluator.predict(
-                    task,
-                    datamodule=predict_dm,
-                )
+                if hasattr(self._config, FEWSHOT):
+                    whole_outputs =  evaluator.predict(
+                        task,
+                        datamodule=predict_dm,
+                    )
+                    outputs = [ele["outputs"] for ele in whole_outputs]
+                    y_true = [ele["y_true"] for ele in whole_outputs]
+                    label_list = [ele["label_list"] for ele in whole_outputs]
+                else:
+                    outputs = evaluator.predict(
+                        task,
+                        datamodule=predict_dm,
+                    )
+        if ret_type == LOGITS:
+            logits = [ele[LOGITS] for ele in outputs]
+            ret = torch.cat(logits)
+        elif ret_type == PROBABILITY:
+            probability = [ele[PROBABILITY] for ele in outputs]
+            ret = torch.cat(probability)
+        elif ret_type == FEATURES:
+            features = [ele[FEATURES] for ele in outputs]
+            ret = torch.cat(features)
+        else:
+            raise ValueError(f"Unknown return type: {ret_type}")
+        if hasattr(self._config, FEWSHOT):
+            label_list = torch.cat(label_list)
+            y_true = torch.cat(y_true)
+            return ret, y_true, label_list
+        else:
+            return ret
 
-        return outputs
-
-    def _on_predict_start(
-        self,
-        config: DictConfig,
-        data: Union[pd.DataFrame, dict, list],
-        requires_label: bool,
-    ):
-        data = data_to_df(data=data)
-
-        if self._column_types is None:
-            allowable_dtypes, fallback_dtype = infer_dtypes_by_model_names(model_config=self._config.model)
-            column_types = infer_column_types(
-                data=data, allowable_column_types=allowable_dtypes, fallback_column_type=fallback_dtype
-            )
-        else:  # called .fit() or .load()
-            column_types = self._column_types
-
-        if self._df_preprocessor is None:
-            df_preprocessor = init_df_preprocessor(
-                config=config.data,
-                column_types=column_types,
-                label_column=self._label_column,
-                train_df_x=data,
-                train_df_y=data[self._label_column] if self._label_column else None,
-            )
-        else:  # called .fit() or .load()
-            df_preprocessor = self._df_preprocessor
-
-        data_processors = copy.deepcopy(self._data_processors)
-        # For prediction data with no labels provided.
-        if not requires_label:
-            data_processors.pop(LABEL, None)
-
-        return data, df_preprocessor, data_processors
+    @staticmethod
+    def _logits_to_prob(logits: torch.Tensor):
+        assert logits.ndim == 2
+        prob = F.softmax(logits.float(), dim=1)
+        prob = prob.detach().cpu().float().numpy()
+        return prob
 
     def evaluate(
         self,
@@ -1400,30 +1415,40 @@ class MultiModalPredictor:
             ret_type = PROBABILITY
         else:
             ret_type = LOGITS
-
-        outputs = self._predict(
-            data=data,
-            requires_label=True,
-        )
-        logits_or_prob = extract_from_output(ret_type=ret_type, outputs=outputs)
-
+        if hasattr(self._config, FEWSHOT):
+            logits_or_prob, y_true, label_list = self._predict(
+                data=data,
+                ret_type=ret_type,
+                requires_label=True,
+            )
+        else:
+            label_list = None
+            y_true = None
+            logits_or_prob = self._predict(
+                data=data,
+                ret_type=ret_type,
+                requires_label=True,
+            )
         metric_data = {}
         if self._problem_type in [BINARY, MULTICLASS]:
             if ret_type == LOGITS:
-                y_pred_prob = logits_to_prob(logits_or_prob)
+                y_pred_prob = self._logits_to_prob(logits_or_prob)
             else:
-                y_pred_prob = logits_or_prob
+                y_pred_prob = logits_or_prob.detach().cpu().float().numpy()
             metric_data[Y_PRED_PROB] = y_pred_prob
 
         y_pred = self._df_preprocessor.transform_prediction(
             y_pred=logits_or_prob,
             inverse_categorical=False,
+            fewshot_label_list=label_list,
         )
         y_pred_inv = self._df_preprocessor.transform_prediction(
             y_pred=logits_or_prob,
             inverse_categorical=True,
+            fewshot_label_list=label_list,
         )
-        y_true = self._df_preprocessor.transform_label_for_metric(df=data)
+        if y_true is None:
+            y_true = self._df_preprocessor.transform_label_for_metric(df=data)
 
         metric_data.update(
             {
@@ -1456,38 +1481,10 @@ class MultiModalPredictor:
         else:
             return results
 
-    def _match_queries_and_candidates(
-        self,
-        query_data: Union[pd.DataFrame, dict, list],
-        candidate_data: Union[pd.DataFrame, dict, list],
-        return_prob: Optional[bool] = False,
-    ):
-        query_embeddings = self.extract_embedding(query_data, as_tensor=True)
-        assert (
-            len(query_embeddings) == 1
-        ), f"Multiple embedding types `{query_embeddings.keys()}` exist in query data. Please reduce them to one type."
-        query_embeddings = list(query_embeddings.values())[0]
-
-        candidate_embeddings = self.extract_embedding(candidate_data, as_tensor=True)
-        assert (
-            len(candidate_embeddings) == 1
-        ), f"Multiple embedding types `{candidate_embeddings.keys()}` exist in candidate data. Please reduce them to one type."
-        candidate_embeddings = list(candidate_embeddings.values())[0]
-
-        if return_prob:
-            ret = (100.0 * query_embeddings @ candidate_embeddings.T).float().softmax(dim=-1)
-        else:
-            ret = (query_embeddings @ candidate_embeddings.T).argmax(dim=-1)
-
-        ret = tensor_to_ndarray(ret)
-
-        return ret
-
     def predict(
         self,
         data: Union[pd.DataFrame, dict, list],
-        candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
-        as_pandas: Optional[bool] = None,
+        as_pandas: Optional[bool] = True,
     ):
         """
         Predict values for the label column of new data.
@@ -1497,8 +1494,6 @@ class MultiModalPredictor:
         data
              The data to make predictions for. Should contain same column names as training data and
               follow same format (except for the `label` column).
-        candidate_data
-            The candidate data from which to search the query data's matches.
         as_pandas
             Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
 
@@ -1511,36 +1506,22 @@ class MultiModalPredictor:
         else:
             ret_type = LOGITS
 
-        if candidate_data:
-            pred = self._match_queries_and_candidates(
-                query_data=data,
-                candidate_data=candidate_data,
-                return_prob=False,
-            )
-        else:
-            outputs = self._predict(
-                data=data,
-                requires_label=False,
-            )
-            logits_or_prob = extract_from_output(outputs=outputs, ret_type=ret_type)
-
-            if self._df_preprocessor:
-                pred = self._df_preprocessor.transform_prediction(
-                    y_pred=logits_or_prob,
-                )
-            else:
-                pred = logits_or_prob
-
-        if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
+        logits_or_prob = self._predict(
+            data=data,
+            ret_type=ret_type,
+            requires_label=False,
+        )
+        pred = self._df_preprocessor.transform_prediction(
+            y_pred=logits_or_prob,
+        )
+        if as_pandas:
             pred = self._as_pandas(data=data, to_be_converted=pred)
-
         return pred
 
     def predict_proba(
         self,
         data: Union[pd.DataFrame, dict, list],
-        candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
-        as_pandas: Optional[bool] = None,
+        as_pandas: Optional[bool] = True,
         as_multiclass: Optional[bool] = True,
     ):
         """
@@ -1552,8 +1533,6 @@ class MultiModalPredictor:
         data
             The data to make predictions for. Should contain same column names as training data and
               follow same format (except for the `label` column).
-        candidate_data
-            The candidate data from which to search the query data's matches.
         as_pandas
             Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
         as_multiclass
@@ -1566,8 +1545,9 @@ class MultiModalPredictor:
         When as_multiclass is True, the output will always have shape (#samples, #classes).
         Otherwise, the output will have shape (#samples,)
         """
-        assert self._problem_type not in [
-            REGRESSION,
+        assert self._problem_type in [
+            BINARY,
+            MULTICLASS,
         ], f"Problem {self._problem_type} has no probability output."
 
         if hasattr(self._config, MATCHER):
@@ -1575,23 +1555,16 @@ class MultiModalPredictor:
         else:
             ret_type = LOGITS
 
-        if candidate_data:
-            prob = self._match_queries_and_candidates(
-                query_data=data,
-                candidate_data=candidate_data,
-                return_prob=True,
-            )
-        else:
-            outputs = self._predict(
-                data=data,
-                requires_label=False,
-            )
-            logits_or_prob = extract_from_output(outputs=outputs, ret_type=ret_type)
+        logits_or_prob = self._predict(
+            data=data,
+            ret_type=ret_type,
+            requires_label=False,
+        )
 
-            if ret_type == LOGITS:
-                prob = logits_to_prob(logits_or_prob)
-            else:
-                prob = logits_or_prob
+        if ret_type == LOGITS:
+            prob = self._logits_to_prob(logits_or_prob)
+        else:
+            prob = logits_or_prob.detach().cpu().float().numpy()
 
         if not as_multiclass:
             if self._problem_type == BINARY:
@@ -1601,17 +1574,13 @@ class MultiModalPredictor:
                     problem_type=self._problem_type,
                 )
                 prob = prob[:, pos_label]
-
-        if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
+        if as_pandas:
             prob = self._as_pandas(data=data, to_be_converted=prob)
-
         return prob
 
     def extract_embedding(
         self,
         data: Union[pd.DataFrame, dict, list],
-        return_masks: Optional[bool] = False,
-        as_tensor: Optional[bool] = False,
         as_pandas: Optional[bool] = False,
     ):
         """
@@ -1622,11 +1591,6 @@ class MultiModalPredictor:
         data
             The data to extract embeddings for. Should contain same column names as training dataset and
             follow same format (except for the `label` column).
-        return_masks
-            If true, returns a mask dictionary, whose keys are the same as those in the features dictionary.
-            If a sample has empty input in feature column `image_0`, the sample will has mask 0 under key `image_0`.
-        as_tensor
-            Whether to return a Pytorch tensor.
         as_pandas
             Whether to return the output as a pandas DataFrame (True) or numpy array (False).
 
@@ -1636,30 +1600,16 @@ class MultiModalPredictor:
         It will have shape (#samples, D) where the embedding dimension D is determined
         by the neural network's architecture.
         """
-        turn_on_off_feature_column_info(
-            data_processors=self._data_processors,
-            flag=True,
-        )
-        outputs = self._predict(
+        features = self._predict(
             data=data,
+            ret_type=FEATURES,
             requires_label=False,
         )
-        if self._problem_type in [ZERO_SHOT]:
-            features = extract_from_output(outputs=outputs, ret_type=COLUMN_FEATURES, as_ndarray=as_tensor is False)
-            if return_masks:
-                masks = extract_from_output(outputs=outputs, ret_type=MASKS, as_ndarray=as_tensor is False)
-        else:
-            features = extract_from_output(outputs=outputs, ret_type=FEATURES, as_ndarray=as_tensor is False)
-
+        features = features.detach().cpu().numpy()
         if as_pandas:
             features = pd.DataFrame(features, index=data.index)
-            if return_masks:
-                masks = pd.DataFrame(masks, index=data.index)
 
-        if return_masks:
-            return features, masks
-        else:
-            return features
+        return features
 
     def _as_pandas(
         self,
@@ -1756,17 +1706,10 @@ class MultiModalPredictor:
             model_path = os.path.join(self._save_path, "model.ckpt")
             if os.path.isfile(model_path):
                 shutil.copy(model_path, path)
-            else:
-                # FIXME(?) Fix the saving logic
-                RuntimeError(
-                    f"Cannot find the model checkpoint in '{model_path}'. Have you removed the folder that "
-                    f"is created in .fit()? Currently, .save() won't function appropriately if that folder is "
-                    f"removed."
-                )
 
     @staticmethod
     def _load_metadata(
-        predictor: MultiModalPredictor,
+        predictor: AutoMMPredictor,
         path: str,
         resume: Optional[bool] = False,
         verbosity: Optional[int] = 3,
@@ -1805,6 +1748,7 @@ class MultiModalPredictor:
         except:  # backward compatibility. reconstruct the data processor in case something went wrong.
             data_processors = init_data_processors(
                 config=config,
+                df_preprocessor=df_preprocessor,
             )
 
         predictor._label_column = assets["label_column"]

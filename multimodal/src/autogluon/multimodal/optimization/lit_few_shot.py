@@ -10,17 +10,19 @@ from .utils import (
     apply_layerwise_lr_decay,
     apply_single_lr,
 )
+from ..models.protonet import ProtoNet, ProtoNet_Finetune
 from ..constants import LOGITS, WEIGHT, AUTOMM
 from typing import Union, Optional, List, Dict, Callable
 from ..data.mixup import MixupModule, multimodel_mixup
 import torchmetrics
 from torchmetrics.aggregation import BaseAggregator
 from torch.nn.modules.loss import _Loss
+from omegaconf import OmegaConf, DictConfig
 
 logger = logging.getLogger(AUTOMM)
 
 
-class LitModule(pl.LightningModule):
+class FewShotLitModule(pl.LightningModule):
     """
     Control the loops for training, evaluation, and prediction. This module is independent of
     the model definition. This class inherits from the Pytorch Lightning's LightningModule:
@@ -47,6 +49,9 @@ class LitModule(pl.LightningModule):
         efficient_finetune: Optional[str] = None,
         mixup_fn: Optional[MixupModule] = None,
         mixup_off_epoch: Optional[int] = 0,
+        train_model: Optional[str] = None,
+        predict_model: Optional[str] = None,
+        predict_model_args: Optional[DictConfig] = None,
     ):
         """
         Parameters
@@ -107,11 +112,42 @@ class LitModule(pl.LightningModule):
             - bit_fit (only finetune the bias terms)
             - norm_fit (only finetune the weights in norm layers / bias layer)
             - None (do not use efficient finetuning strategies)
+        mixup_fn
+            The mixup function for mixup.
+        mixup_off_epoch
+            The epoch when the mixup should turn off.
+        train_model
+            The few-shot model used for training and validation.
+        predict_model
+            The few-shot model used for prediction.
+        predict_model_args
+            The args of the few-shot model including the optimization and augmentations.
 
         """
         super().__init__()
         self.save_hyperparameters(ignore=["model", "validation_metric", "test_metric", "loss_func"])
-        self.model = model
+        self.backbone = model
+        if train_model is not None:
+            if train_model.lower().startswith("protonet"):
+                self.model = ProtoNet("protonet", model)
+            else:
+                self.model = ProtoNet("protonet", model)
+        elif predict_model is not None:
+            if predict_model.lower().startswith("protonet_finetune"):
+                self.model = ProtoNet_Finetune(
+                    prefix="protonet_fintune",
+                    backbone=model,
+                    num_iters=OmegaConf.select(predict_model_args, "num_iters"),
+                    lr=OmegaConf.select(predict_model_args, "lr"),
+                    aug_prob=OmegaConf.select(predict_model_args, "aug_prob"),
+                    aug_types=OmegaConf.select(predict_model_args, "aug_types"),
+                )
+            else:
+                self.model = ProtoNet("protonet", model)
+        else:
+            raise ValueError(
+                "Must have a few shot model."
+            )
         self.validation_metric = validation_metric
         self.validation_metric_name = f"val_{validation_metric_name}"
         self.loss_func = loss_func
@@ -128,16 +164,7 @@ class LitModule(pl.LightningModule):
         output: Dict,
         label: torch.Tensor,
     ):
-        loss = 0
-        for _, per_output in output.items():
-            weight = per_output[WEIGHT] if WEIGHT in per_output else 1
-            loss += (
-                self.loss_func(
-                    input=per_output[LOGITS].squeeze(dim=1),
-                    target=label,
-                )
-                * weight
-            )
+        loss = self.loss_func(output[self.model.prefix][LOGITS], label)
         return loss
 
     def _compute_metric_score(
@@ -155,17 +182,28 @@ class LitModule(pl.LightningModule):
         else:
             metric.update(logits.squeeze(dim=1), label)
 
-
     def _shared_step(
         self,
         batch: Dict,
     ):
-        label = batch[self.model.label_key]
+        tensor_support = batch["tensorsupport"]
+        label_support = batch["labelsupport"]
+        tensor_query = batch["tensorquery"]
+        label_query = batch["labelquery"]
         if self.mixup_fn is not None:
             self.mixup_fn.mixup_enabled = self.training & (self.current_epoch < self.hparams.mixup_off_epoch)
-            batch, label = multimodel_mixup(batch=batch, model=self.model, mixup_fn=self.mixup_fn)
-        output = self.model(batch)
-        loss = self._compute_loss(output=output, label=label)
+            tensor_query, label = multimodel_mixup(batch=tensor_query, model=self.model, mixup_fn=self.mixup_fn)
+            for b in range(label.shape[0]):
+                for perlabel in label[b]:
+                    for i, x in enumerate(tensor_support[self.model.backbone.label_key][b]):
+                        if x == perlabel:
+                            label_query[b, i] = label_support[b, i]
+                            break
+        output = self.model(tensor_support, label_support, tensor_query)
+        output[self.model.prefix][LOGITS] = output[self.model.prefix][LOGITS].view(
+            output[self.model.prefix][LOGITS].shape[0] * output[self.model.prefix][LOGITS].shape[1], -1)
+        label_query = label_query.view(-1)
+        loss = self._compute_loss(output=output, label=label_query)
         return output, loss
 
     def training_step(self, batch, batch_idx):
@@ -208,16 +246,13 @@ class LitModule(pl.LightningModule):
             Index of mini-batch.
         """
         output, loss = self._shared_step(batch)
-        if isinstance(self.loss_func, nn.BCEWithLogitsLoss):
-            output[self.model.prefix][LOGITS] = torch.sigmoid(output[self.model.prefix][LOGITS].float())
-        # By default, on_step=False and on_epoch=True
-        self.log("val_loss", loss)
         self._compute_metric_score(
             metric=self.validation_metric,
             custom_metric_func=self.custom_metric_func,
             logits=output[self.model.prefix][LOGITS],
-            label=batch[self.model.label_key],
-        ),
+            label=batch["labelquery"].view(-1),
+        )
+        self.log("val_loss", loss)
         self.log(
             self.validation_metric_name,
             self.validation_metric,
@@ -245,10 +280,30 @@ class LitModule(pl.LightningModule):
         -------
         A dictionary with the mini-batch's logits and features.
         """
-        output = self.model(batch)
-        if isinstance(self.loss_func, nn.BCEWithLogitsLoss):
-            output[self.model.prefix][LOGITS] = torch.sigmoid(output[self.model.prefix][LOGITS].float())
-        return output[self.model.prefix]
+        tensor_support_label = batch["tensorsupport"][self.model.backbone.label_key]
+        tensor_query_label = batch["tensorquery"][self.model.backbone.label_key]
+        label_support = batch["labelsupport"]
+        batch_size = label_support.shape[0]
+        ncls = int(label_support[0].max() + 1)
+        nqry = int(tensor_query_label.shape[1])
+        label_list = None
+        for b in range(batch_size):
+            perlist = torch.empty(ncls).cuda()
+            for idx in range(label_support[0].max() + 1):
+                for i, x in enumerate(label_support[b]):
+                    if x == idx:
+                        perlist[idx] = tensor_support_label[b, i]
+                        break
+            if label_list is None:
+                label_list = perlist.unsqueeze(dim=0).repeat(nqry,1)
+            else:
+                label_list = torch.cat([label_list, perlist.unsqueeze(dim=0).repeat(nqry,1)], dim=0)
+        output, loss = self._shared_step(batch)
+        return {
+            "outputs": output[self.model.prefix],
+            "y_true": tensor_query_label.view(-1),
+            "label_list": label_list,
+        }
 
     def configure_optimizers(self):
         """

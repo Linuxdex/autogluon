@@ -2,8 +2,8 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 import pandas as pd
 from typing import Optional, Union, List
-from .dataset import BaseDataset
-from .collator import Dict
+from .dataset import BaseDataset, EpisodeDataset
+from .collator import Dict, Few_shot_Dict
 from ..constants import TRAIN, VAL, TEST, PREDICT
 from .preprocess_dataframe import MultiModalFeaturePreprocessor
 
@@ -27,6 +27,7 @@ class BaseDataModule(LightningDataModule):
         val_data: Optional[pd.DataFrame] = None,
         test_data: Optional[pd.DataFrame] = None,
         predict_data: Optional[pd.DataFrame] = None,
+        few_shot: Optional[dict] = None
     ):
         """
         Parameters
@@ -52,6 +53,8 @@ class BaseDataModule(LightningDataModule):
             Test data.
         predict_data
             Prediction data. No labels required in it.
+        few_shot
+            The configs of few shot learning.
         """
         super().__init__()
         self.prepare_data_per_node = True
@@ -69,15 +72,35 @@ class BaseDataModule(LightningDataModule):
         self.val_data = val_data
         self.test_data = test_data
         self.predict_data = predict_data
+        if few_shot is not None:
+            self.is_few_shot = True
+            self.nCLS = getattr(few_shot, "nway")
+            self.nSupport = getattr(few_shot, "nshot")
+            self.nQuery = getattr(few_shot, "nqry")
+            self.nEpisode = getattr(few_shot, "nepisode")
+        else:
+            self.is_few_shot = False
 
     def set_dataset(self, split):
         data_split = getattr(self, f"{split}_data")
-        dataset = BaseDataset(
-            data=data_split,
-            preprocessor=self.df_preprocessor,
-            processors=self.data_processors,
-            is_training=split == TRAIN,
-        )
+        if not self.is_few_shot:
+            dataset = BaseDataset(
+                data=data_split,
+                preprocessor=self.df_preprocessor,
+                processors=self.data_processors,
+                is_training=split == TRAIN,
+            )
+        else:
+            dataset = EpisodeDataset(
+                data=data_split,
+                preprocessor=self.df_preprocessor,
+                processors=self.data_processors,
+                nCls=self.nCLS,
+                nSupport=self.nSupport,
+                nQuery=self.nQuery,
+                is_training=split == TRAIN,
+                nEpisode=self.nEpisode,
+            )
 
         setattr(self, f"{split}_dataset", dataset)
 
@@ -192,10 +215,11 @@ class BaseDataModule(LightningDataModule):
         A "Dict" collator wrapping other collators.
         """
         collate_fn = {}
-        for per_preprocessor, per_data_processors_group in zip(self.df_preprocessor, self.data_processors):
+        for per_data_processors_group in self.data_processors:
             for per_modality in per_data_processors_group:
-                per_modality_column_names = per_preprocessor.get_column_names(modality=per_modality)
-                if per_modality_column_names:
-                    for per_model_processor in per_data_processors_group[per_modality]:
-                        collate_fn.update(per_model_processor.collate_fn(per_modality_column_names))
-        return Dict(collate_fn)
+                for per_model_processor in per_data_processors_group[per_modality]:
+                    collate_fn.update(per_model_processor.collate_fn())
+        if self.is_few_shot:
+            return Few_shot_Dict(collate_fn, nSupport=self.nSupport, nQuery=self.nQuery, nEpisode=self.nEpisode)
+        else:
+            return Dict(collate_fn)

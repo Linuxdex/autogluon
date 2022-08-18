@@ -6,11 +6,9 @@ NUMERICAL = "numerical"
 IMAGE_PATH = "image_path"
 
 # Problem types
-CLASSIFICATION = "classification"
 BINARY = "binary"
 MULTICLASS = "multiclass"
 REGRESSION = "regression"
-ZERO_SHOT = "zero_shot"
 
 # Input keys
 IMAGE = "image"
@@ -90,7 +88,8 @@ OPTIMIZATION = "optimization"
 ENVIRONMENT = "environment"
 DISTILLER = "distiller"
 MATCHER = "matcher"
-VALID_CONFIG_KEYS = [MODEL, DATA, OPTIMIZATION, ENVIRONMENT, DISTILLER, MATCHER]
+FEWSHOT = "fewshot"
+VALID_CONFIG_KEYS = [MODEL, DATA, OPTIMIZATION, ENVIRONMENT, DISTILLER, MATCHER, FEWSHOT]
 
 # Image normalization mean and std. This is only to normalize images for the CLIP model.
 CLIP_IMAGE_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -142,6 +141,3 @@ RAY_TUNE_CHECKPOINT = "ray_tune_checkpoint.ckpt"
 BEST_K_MODELS_FILE = "best_k_models.yaml"
 LAST_CHECKPOINT = "last.ckpt"
 MODEL_CHECKPOINT = "model.ckpt"
-
-# url
-S3_PREFIX = "s3://"
